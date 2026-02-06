@@ -19,6 +19,36 @@ if str(_PROJECT_ROOT) not in sys.path:
 from diy_repair.config import DEFAULT_OUTPUT_DIR, FILENAMES
 
 
+def merge_corrected_qa_records(valid_qa, failure_labeled, corrected_list):
+    """
+    Pure function to merge original and corrected Q&A records.
+
+    Args:
+        valid_qa: list of original/validated Q&A dicts (each with trace_id)
+        failure_labeled: list of failure-labeled dicts (must include trace_id and overall_failure)
+        corrected_list: list of correction results (each with trace_id, qa_pair, is_valid)
+
+    Returns:
+        merged list of Q&A dicts (same format as valid_qa) where failed items
+        with valid corrections are replaced by their corrected versions.
+    """
+    failed_ids = {r["trace_id"] for r in failure_labeled if r.get("overall_failure") == 1}
+    corrected_by_id = {}
+    for r in corrected_list:
+        tid = r.get("trace_id")
+        if tid and r.get("is_valid") and r.get("qa_pair"):
+            corrected_by_id[tid] = {**r["qa_pair"], "trace_id": tid}
+
+    merged = []
+    for rec in valid_qa:
+        trace_id = rec.get("trace_id")
+        if trace_id in failed_ids and trace_id in corrected_by_id:
+            merged.append(corrected_by_id[trace_id])
+        else:
+            merged.append(rec)
+    return merged
+
+
 def main():
     out_dir = _PROJECT_ROOT / DEFAULT_OUTPUT_DIR
     valid_path = out_dir / FILENAMES["structurally_valid_qa"]
@@ -38,25 +68,18 @@ def main():
     with open(corrected_path, "r", encoding="utf-8") as f:
         corrected_list = json.load(f)
 
-    failed_ids = {r["trace_id"] for r in failure_labeled if r.get("overall_failure") == 1}
-    corrected_by_id = {}
-    for r in corrected_list:
-        tid = r.get("trace_id")
-        if tid and r.get("is_valid") and r.get("qa_pair"):
-            corrected_by_id[tid] = {**r["qa_pair"], "trace_id": tid}
-
-    merged = []
-    for rec in valid_qa:
-        trace_id = rec.get("trace_id")
-        if trace_id in failed_ids and trace_id in corrected_by_id:
-            merged.append(corrected_by_id[trace_id])
-        else:
-            merged.append(rec)
+    merged = merge_corrected_qa_records(valid_qa, failure_labeled, corrected_list)
 
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(merged, f, indent=2, ensure_ascii=False)
 
-    replaced = sum(1 for rec in valid_qa if rec.get("trace_id") in failed_ids and rec.get("trace_id") in corrected_by_id)
+    failed_ids = {r["trace_id"] for r in failure_labeled if r.get("overall_failure") == 1}
+    corrected_ids = {
+        r.get("trace_id") for r in corrected_list if r.get("is_valid") and r.get("qa_pair")
+    }
+    replaced = sum(
+        1 for rec in valid_qa if rec.get("trace_id") in failed_ids and rec.get("trace_id") in corrected_ids
+    )
     print(f"Merged {len(merged)} Q&A pairs ({replaced} replaced with corrected versions).")
     print(f"Saved to {output_path}")
     print("Re-label with: python main.py --labeling-only --input-qa output/qa_after_correction.json")

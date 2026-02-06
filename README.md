@@ -2,6 +2,25 @@
 
 This project generates and validates synthetic Q&A pairs for home DIY repair scenarios using OpenAI's API with structured validation.
 
+## What this demonstrates
+
+This repo is built as a **portfolio piece** to show end-to-end design and implementation of an **LLM-based synthetic data pipeline** with quality control and human-in-the-loop calibration.
+
+- **LLM-as-judge**  
+  A separate LLM call scores each Q&A on **6 failure modes** (incomplete answer, safety violations, unrealistic tools, overcomplicated solution, missing context, poor-quality tips). Each mode gets a binary pass/fail; any failure marks the sample as failed. The judge uses explicit SUCCESS/FAILURE criteria in prompts so behavior can be tuned.
+
+- **Human-in-the-loop calibration**  
+  Human labels on a subset are compared to the judge’s labels (script: `human_vs_llm_comparison.py`). The comparison produces **false positives** (judge said fail, human said pass) and **false negatives** (judge said pass, human said fail) per mode. Those metrics drive **manual edits to the judge prompts** in `failure_labeling.py` (e.g. loosen where FP is high, tighten where FN is high), so the judge aligns with human judgment. The updated prompts are then used on all future runs.
+
+- **Iterative correction loop**  
+  Failed Q&A are sent back to the LLM with **per-mode fix instructions** (correction phase). Corrected content is **merged** back into the dataset (script: `merge_corrected_qa.py`), and the **same judge** is run again on the merged set (`--labeling-only --input-qa output/qa_after_correction.json`) to get a **post-correction success rate**. The loop (correct → merge → re-label) can be repeated to push the rate higher.
+
+- **Outcome**  
+  In practice, success rate improved from a baseline in the low–mid 80s to **~94%** after (1) calibrating the judge from human comparison and (2) running the correction → merge → re-label workflow. The pipeline is structured so that **judge tuning is persistent** (code changes), while each run gets a **new success rate** for newly generated data.
+
+- **Analysis and heatmaps**  
+  After failure labeling, the analysis phase produces three visualizations in **`output/`**: (1) **`failure_heatmap.png`** — one row per failure mode, one column per sample, color-coded 0/1 so you can see which modes fail for which samples; (2) **`failure_rates.png`** — bar chart of failure rate per mode (e.g. which mode triggers most often); (3) **`failure_correlations.png`** — correlation matrix between the six modes (e.g. do incomplete answers tend to co-occur with missing context?). These support debugging the judge and prioritizing which prompts or corrections to tune.
+
 ## Project Structure
 
 ```
@@ -81,14 +100,73 @@ All pipeline outputs (and script outputs) go into **`output/`** by default so th
 - **Filtering**: Removes invalid entries before analysis
 - **Detailed Reporting**: Comprehensive validation summaries
 
-## Installation
+## Quick start
 
-1. Install dependencies:
+From the project root:
+
 ```bash
+# 1. Install dependencies
 pip install -r requirements.txt
+
+# 2. Set your OpenAI API key (pick one)
+# Option A: copy .env.example to .env and set OPENAI_API_KEY there
+cp .env.example .env
+# Option B: export in the shell
+export OPENAI_API_KEY="your-key-here"
+
+# 3. Run the full pipeline (generate → validate → label → analyze → correct)
+python main.py
 ```
 
-2. Ensure your OpenAI API key is configured in `openai_client.py`
+Outputs are written under **`output/`** by default (see Output Files below). To run only part of the pipeline, use `--generation-only`, `--validation-only`, `--labeling-only`, `--analysis-only`, or `--correction-only`.
+
+### Reproducing a high success-rate run
+
+To approximate the kind of run that reaches a high judge pass rate (e.g. ~90%+ after correction):
+
+1. **Generate and label** with a fixed seed and sample count:
+   ```bash
+   python main.py --samples 45 --seed 42
+   ```
+   This runs generation, validation, failure labeling, analysis, and one correction phase. Note the printed success rate.
+
+2. **Merge corrected Q&A back and re-label** to measure the effect of correction:
+   ```bash
+   python scripts/merge_corrected_qa.py
+   python main.py --labeling-only --input-qa output/qa_after_correction.json
+   ```
+   The second command prints the **post-correction success rate**. You can repeat the correction → merge → re-label loop (run `python main.py --correction-only`, then the two commands above again) to push the rate higher; see **Improving success rate (judge + correction)** below for the full workflow.
+
+3. **Optional: run tests** (no API key required):
+   ```bash
+   pytest
+   ```
+
+## How to run (commands reference)
+
+All commands are run from the **project root**. Ensure `OPENAI_API_KEY` is set (e.g. in `.env` or `export`) unless noted.
+
+| What you want to do | Command |
+|---------------------|--------|
+| **Full pipeline** (generate → validate → label → analyze → correct) | `python main.py` |
+| **Full pipeline with more samples / fixed seed** | `python main.py --samples 45 --seed 42` |
+| **Generation only** | `python main.py --generation-only --samples 20` |
+| **Validation only** (needs existing `output/generation_results.json`) | `python main.py --validation-only` |
+| **Failure labeling only** (needs existing `output/structurally_valid_qa_pairs.json`) | `python main.py --labeling-only` |
+| **Label a different Q&A file** (e.g. after correction) | `python main.py --labeling-only --input-qa output/qa_after_correction.json` |
+| **Analysis only** (needs existing `output/failure_labeled_data.csv`; writes heatmaps + report) | `python main.py --analysis-only` |
+| **Correction only** (needs existing `output/failure_labeled_data.json`; writes `output/corrected_qa_pairs.json`) | `python main.py --correction-only` |
+| **Merge corrected Q&A** (needs `structurally_valid_qa_pairs.json`, `failure_labeled_data.json`, `corrected_qa_pairs.json`; writes `output/qa_after_correction.json`) | `python scripts/merge_corrected_qa.py` |
+| **Human labeling** (interactive; writes `output/human_labels.json`) | `python scripts/human_labeling.py` |
+| **Human vs LLM comparison** (writes `output/human_vs_llm_comparison.json`) | `python scripts/human_vs_llm_comparison.py` |
+| **Quick stats** from `output/` (or pass a path) | `python main.py stats` or `python main.py stats ./other_dir` |
+| **Run tests** (no API key needed) | `pytest` |
+
+Typical workflows:
+
+- **One-shot full run:** `python main.py`
+- **Correction then re-measure:** `python main.py --correction-only` → `python scripts/merge_corrected_qa.py` → `python main.py --labeling-only --input-qa output/qa_after_correction.json`
+- **Calibrate judge:** Label a subset with `python scripts/human_labeling.py`, then `python scripts/human_vs_llm_comparison.py`, then edit prompts in `diy_repair/failure_labeling.py` and re-run labeling.
 
 ## Model Selection
 
@@ -140,6 +218,15 @@ python main.py stats
 
 **Note:** Success rate (structural validation and failure-label rate) varies from run to run because each run generates new samples and the LLM is non-deterministic. The refactor did not change any validation or labeling logic. Use `--seed` to get the same *template* order across runs; for strict reproducibility you’d also need to fix the model’s randomness (e.g. temperature=0 in the API).
 
+### Running tests
+
+Unit tests use `pytest` and cover validation logic and the merge-corrected-QA step (no API calls).
+
+```bash
+pip install -r requirements.txt
+pytest
+```
+
 ## Output Files
 
 By default all of these are written under **`output/`**:
@@ -149,9 +236,21 @@ By default all of these are written under **`output/`**:
 3. **`validation_summary.json`**: Validation statistics and common errors
 4. **`failure_labeled_data.json`** / **`.csv`**: Per-sample failure-mode labels
 5. **`failure_analysis_report.json`**: Summary and target failure rate
-6. **`failure_heatmap.png`**, **`failure_rates.png`**, **`failure_correlations.png`**: Analysis charts
+6. **`failure_heatmap.png`**, **`failure_rates.png`**, **`failure_correlations.png`**: Analysis charts (see [Analysis and heatmaps](#analysis-and-heatmaps) below)
 7. **`corrected_qa_pairs.json`**: Output of correction phase (when run)
 8. **`human_labels.json`**, **`human_vs_llm_comparison.json`**: From scripts (when run)
+
+### Analysis and heatmaps
+
+The analysis phase (run automatically in a full `python main.py` or via `python main.py --analysis-only`) reads **`failure_labeled_data.csv`** and writes three PNGs to **`output/`**:
+
+| File | Description |
+|------|-------------|
+| **`failure_heatmap.png`** | Rows = 6 failure modes, columns = samples. Each cell is 0 (pass) or 1 (fail), color-coded. Use it to see which samples fail on which modes at a glance. |
+| **`failure_rates.png`** | Bar chart of failure rate per mode (e.g. 15% for incomplete_answer, 8% for safety_violations). Surfaces which modes trigger most often. |
+| **`failure_correlations.png`** | Correlation matrix between the six modes. Highlights whether certain failures tend to co-occur (e.g. incomplete answer with missing context). |
+
+These support tuning the judge (which modes to loosen/tighten), prioritizing correction, and checking progress across runs.
 
 ## Data Structure
 
