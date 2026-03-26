@@ -278,14 +278,6 @@ The validation phase applies these quality checks:
 5. **Safety Adequacy**: Proper warnings and protective measures
 6. **Tips Usefulness**: Additional practical value beyond basic instructions
 
-## Next Steps (Phase 3 & 4)
-
-After running generation and validation:
-
-1. **Failure Labeling**: Create DataFrame with binary failure mode columns
-2. **Analysis**: Generate heatmaps and identify failure patterns
-3. **Correction**: Run correction phase for failed Q&A; optionally merge and re-label to measure improvement
-
 ## Improving success rate (judge + correction)
 
 When the LLM judge reports e.g. 84% success and you want to push higher:
